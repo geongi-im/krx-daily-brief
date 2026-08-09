@@ -1,0 +1,27 @@
+# 비밀 정보 — KRX 계정이 평문으로 들어간다. 절대 커밋 금지.
+# 형식은 .env.example로만 공유한다.
+.env
+
+# 가상환경
+.venv/
+venv/
+env/
+
+# 파이썬 캐시
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 생성물 — 리포트는 main.py로 언제든 다시 만들 수 있다.
+# 특정 리포트를 남기려면: git add -f output/report_20260807.html
+output/
+
+# 편집기
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
