@@ -31,12 +31,17 @@ copy .env.example .env
 ```
 
 ```
-KRX_ID=아이디
-KRX_PW=비밀번호
+KRX_LOGIN_ID=아이디
+KRX_LOGIN_PASSWORD=비밀번호
 ```
 
-실행 시 자동으로 읽힙니다(별도 패키지 불필요). 이미 같은 이름의 환경변수가 있으면
+실행 시 python-dotenv로 자동으로 읽힙니다. 이미 같은 이름의 환경변수가 있으면
 그쪽이 우선합니다. `.env`는 계정 정보이므로 공유·커밋하지 마세요.
+
+pykrx(1.2.8)는 세션을 만들거나 만료 후 갱신할 때 `KRX_ID` / `KRX_PW`라는 이름을
+직접 읽습니다(`website/comm/auth.py`의 `get_auth_session`). 이름을 바꿔 끼울 설정은
+없어서, `main.py`가 위 값을 그 이름으로 옮겨 준 뒤 pykrx를 호출합니다. 따라서
+`.env`에는 `KRX_LOGIN_*`만 적으면 됩니다.
 
 ### 설치 확인
 

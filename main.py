@@ -22,7 +22,7 @@ v1과의 차이:
     python main.py --demo
 
 필요 패키지:
-    pip install pykrx yfinance pandas
+    pip install -r requirements.txt
 
 파일 구성 (수집 → 렌더링 → 실행의 한 방향 의존):
     collect.py  설정·Bundle·KRX/야후/뉴스 수집·데모 데이터
@@ -47,6 +47,8 @@ import sys
 import traceback
 from datetime import datetime, timedelta
 
+from dotenv import load_dotenv
+
 from collect import Bundle, collect_krx, collect_news, collect_us, demo_bundle
 from render import render, validate_independence
 
@@ -60,25 +62,54 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 
-def load_dotenv(path=None):
-    """스크립트 폴더의 .env 파일에서 환경변수를 로드한다 (외부 패키지 불필요).
+# .env에 적는 KRX 계정 이름. 이 프로젝트는 이 두 이름만 쓴다.
+KRX_ID_KEY = "KRX_LOGIN_ID"
+KRX_PW_KEY = "KRX_LOGIN_PASSWORD"
 
-    KRX_ID / KRX_PW 등을 .env에 적어두면 실행 시 자동 반영된다.
-    이미 설정된 환경변수는 덮어쓰지 않는다.
+
+def krx_credentials():
+    """KRX 계정을 (아이디, 비밀번호)로 돌려준다. 비어 있으면 None."""
+    return os.environ.get(KRX_ID_KEY) or None, os.environ.get(KRX_PW_KEY) or None
+
+
+def export_krx_credentials():
+    """pykrx가 읽는 이름(KRX_ID / KRX_PW)으로 계정 값을 옮겨 둔다.
+
+    pykrx(1.2.8)는 세션을 만들거나 만료 후 갱신할 때 os.getenv("KRX_ID") /
+    os.getenv("KRX_PW")를 직접 부른다(website/comm/auth.py의 get_auth_session).
+    이름을 바꿔 끼울 설정은 없다. 그래서 .env에 KRX_LOGIN_* 로만 적어두면 이
+    코드는 계정을 읽어도 pykrx는 로그인하지 못하고, 그 실패가 로그인 오류가
+    아니라 '휴장일이거나 아직 데이터가 없습니다' 같은 조회 오류로 나타나 원인을
+    찾기 어렵다. 이름이 어긋나는 지점을 여기 한 곳으로 모은다.
+
+    (utils/krx_session_util은 KRX_LOGIN_* 를 그대로 읽지만 pykrx 0.1.x의
+     webio._session 에 세션을 꽂는다. 1.2.8의 webio.get_session()은 그 변수를
+     보지 않으므로 이 프로젝트에서는 효과가 없다.)
     """
-    p = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    if not os.path.exists(p):
-        return False
-    with open(p, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, _, v = line.partition("=")
-            k, v = k.strip(), v.strip().strip('"').strip("'")
-            if k and k not in os.environ:
-                os.environ[k] = v
-    return True
+    login_id, login_pw = krx_credentials()
+    if login_id:
+        os.environ["KRX_ID"] = login_id
+    if login_pw:
+        os.environ["KRX_PW"] = login_pw
+    return login_id, login_pw
+
+
+ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
+
+def load_env(path=None):
+    """스크립트 폴더의 .env를 읽고 KRX 계정을 pykrx가 보는 이름으로 맞춘다.
+
+    utils/의 모듈들도 python-dotenv를 쓰므로 로딩 방식을 하나로 맞춰 둔다.
+    이미 설정된 환경변수는 덮어쓰지 않는다(load_dotenv의 기본 동작).
+    """
+    p = path or ENV_PATH
+    found = os.path.exists(p)
+    if found:
+        load_dotenv(p)
+    # .env가 없어도 환경변수로 직접 넣었을 수 있으므로 항상 맞춰 준다.
+    export_krx_credentials()
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +119,8 @@ def load_dotenv(path=None):
 # KRX 로그인 실패 코드별 해결 방법. 실패 사유 문구는 KRX 응답 원문을 그대로 쓰고,
 # 여기에는 "그래서 무엇을 해야 하는지"만 둔다.
 KRX_LOGIN_FIX = {
+    "CD006": (".env의 KRX_LOGIN_PASSWORD 값이 KRX 계정 비밀번호와 다릅니다. "
+              "재시도를 반복하면 계정이 잠기므로(CD007), 값을 먼저 확인한 뒤 다시 실행하세요."),
     "CD007": ("계정이 잠긴 상태입니다. .env의 비밀번호만 고쳐서는 풀리지 않습니다. "
               "data.krx.co.kr에서 비밀번호 재설정으로 잠금을 먼저 해제한 뒤 .env를 갱신하세요."),
     "CD010": "data.krx.co.kr에서 비밀번호를 변경한 뒤 .env를 갱신하세요.",
@@ -111,9 +144,9 @@ def probe_krx_login():
     except ImportError:
         return None, None, "pykrx 미설치 (pip install -r requirements.txt)"
 
-    login_id, login_pw = os.environ.get("KRX_ID"), os.environ.get("KRX_PW")
+    login_id, login_pw = krx_credentials()
     if not (login_id and login_pw):
-        return False, None, "KRX_ID / KRX_PW 미설정"
+        return False, None, "KRX_LOGIN_ID / KRX_LOGIN_PASSWORD 미설정"
 
     try:
         s = requests.Session()
@@ -154,14 +187,14 @@ def selftest():
     ok = True
 
     # [1] .env / 환경변수
-    loaded = load_dotenv()
-    id_set = bool(os.environ.get("KRX_ID"))
-    pw_set = bool(os.environ.get("KRX_PW"))
+    loaded = load_env()
+    login_id, login_pw = krx_credentials()
     print(f"[1] .env 파일: {'로드됨' if loaded else '없음(환경변수 직접 설정 가정)'}"
-          f" / KRX_ID: {'설정됨' if id_set else '비어있음'}"
-          f" / KRX_PW: {'설정됨' if pw_set else '비어있음'}")
-    if not (id_set and pw_set):
-        print("    조치: data.krx.co.kr 가입 후 .env에 KRX_ID / KRX_PW를 채우세요.")
+          f" / KRX_LOGIN_ID: {'설정됨' if login_id else '비어있음'}"
+          f" / KRX_LOGIN_PASSWORD: {'설정됨' if login_pw else '비어있음'}")
+    if not (login_id and login_pw):
+        print("    조치: data.krx.co.kr 가입 후 .env에 "
+              "KRX_LOGIN_ID / KRX_LOGIN_PASSWORD를 채우세요.")
         ok = False
 
     # [2] KRX 로그인 — 데이터 조회보다 먼저, 실패 원인을 코드 단위로 특정한다
@@ -236,12 +269,13 @@ def main():
         except ValueError:
             ap.error("날짜 형식은 YYYY-MM-DD 입니다.")
         b = Bundle(date=args.date, date_krx=dt.strftime("%Y%m%d"))
-        loaded = load_dotenv()
-        if not (os.environ.get("KRX_ID") and os.environ.get("KRX_PW")):
+        loaded = load_env()
+        login_id, login_pw = krx_credentials()
+        if not (login_id and login_pw):
             src = ".env 파일은 읽었으나 값이 비어 있습니다" if loaded else ".env 파일이 없습니다"
             print(f"  ※ 참고: 최신 pykrx는 KRX 정보데이터시스템 계정이 필요할 수 있습니다. ({src})\n"
                   "    data.krx.co.kr 무료 회원가입 후 이 폴더의 .env에 입력하세요:\n"
-                  "      KRX_ID=아이디\n      KRX_PW=비밀번호")
+                  "      KRX_LOGIN_ID=아이디\n      KRX_LOGIN_PASSWORD=비밀번호")
         print(f"[1/4] KRX 데이터 수집 중... ({args.date})")
         try:
             collect_krx(b)
