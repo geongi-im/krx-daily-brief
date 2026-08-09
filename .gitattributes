@@ -1,0 +1,28 @@
+# 줄바꿈 정규화
+#
+# core.autocrlf은 사람마다 다르게 설정돼 있어서, 그것에만 맡기면 같은 파일이
+# 누구의 손을 거쳤느냐에 따라 전체 줄이 바뀐 것처럼 보이는 diff가 생긴다.
+# .gitattributes는 core.autocrlf보다 우선하므로, 여기에 한 번 못 박아두면
+# 어느 OS에서 받아도 결과가 같다.
+#
+# text=auto : 텍스트로 판별된 파일은 저장소에 항상 LF로 저장한다.
+# eol=lf    : 작업 폴더에도 LF로 내려받는다. 파이썬 도구와 편집기 모두 LF를
+#             문제 없이 다루고, Windows에서 체크아웃할 때마다 CRLF로 바뀌며
+#             경고가 뜨는 것을 막는다.
+* text=auto eol=lf
+
+# Windows 전용 스크립트는 CRLF가 아니면 실행되지 않는 경우가 있다.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 바이너리 — 줄바꿈 변환도, 텍스트 diff도 하지 않는다.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.xlsx binary
+*.xls  binary
+*.zip  binary
