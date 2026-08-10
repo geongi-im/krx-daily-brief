@@ -255,6 +255,11 @@ def selftest():
 POST_CATEGORY = "시황"
 POST_WRITER = "admin"
 
+# 게시판 목록 카드에 걸리는 썸네일. 리포트는 이미지를 만들지 않으므로 날짜와
+# 무관한 고정 이미지를 쓴다. 파일이 없으면 ApiUtil이 경고만 남기고 그냥 진행한다.
+THUMBNAIL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "img", "thumbnail.png")
+
 
 def success_message(b, title, post_url):
     """전송 완료 안내 메시지. TelegramUtil이 parse_mode=html로 보낸다."""
@@ -301,7 +306,8 @@ def send_report(b):
 
     try:
         result = api.create_post(title=title, content=render_fragment(b),
-                                 category=POST_CATEGORY, writer=POST_WRITER)
+                                 category=POST_CATEGORY, writer=POST_WRITER,
+                                 thumbnail_image_path=THUMBNAIL_PATH)
     except ApiError as e:
         error_message = f"❌ [krx-daily-brief] API 전송 실패\n\n{e.message}"
         print(f"  ! API 전송 실패: {e.message}", file=sys.stderr)
