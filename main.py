@@ -42,6 +42,7 @@ v1과의 차이:
 """
 
 import argparse
+import html
 import os
 import sys
 import traceback
@@ -50,7 +51,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 from collect import Bundle, collect_krx, collect_news, collect_us, demo_bundle
-from render import render, validate_independence
+from render import render, render_fragment, report_title, validate_independence
 
 # 한국어 Windows 콘솔은 cp949라 '—'(U+2014) 같은 문자를 인코딩하지 못해
 # 진단 메시지를 출력하는 순간 UnicodeEncodeError로 죽는다. 오류 문구를 보여주려다
@@ -245,6 +246,86 @@ def selftest():
 
 
 # ---------------------------------------------------------------------------
+# 게시판 API 전송 (--send)
+# ---------------------------------------------------------------------------
+
+# board-research 게시글 메타. 형제 프로젝트들이 카테고리로 주제를 구분하므로
+# ('거래량', '섹터분석' 등) 이 리포트는 '시황'을 쓴다.
+# 서버(mqway)의 검증 규칙은 category/writer 모두 max:50 문자열이라 값 제약은 없다.
+POST_CATEGORY = "시황"
+POST_WRITER = "admin"
+
+
+def success_message(b, title, post_url):
+    """전송 완료 안내 메시지. TelegramUtil이 parse_mode=html로 보낸다."""
+    lines = [f"📈 <b>{html.escape(title)}</b>", "", f"기준일: {b.date} 종가"]
+
+    kospi = b.indices.get("코스피") or {}
+    if kospi.get("close") is not None and kospi.get("chg_pct") is not None:
+        lines.append(f"코스피: {kospi['close']:,.2f} ({kospi['chg_pct']:+.2f}%)")
+
+    if post_url:
+        lines += ["", html.escape(post_url)]
+    else:
+        # 게시글은 올라갔는데 링크만 못 만든 경우. 올라간 사실은 알려야 한다.
+        lines += ["", "(게시물 링크를 확인하지 못했습니다 — 게시판에서 확인하세요)"]
+    return "\n".join(lines)
+
+
+def send_report(b):
+    """리포트 본문을 게시판 API로 보낸다. 성공 여부를 bool로 돌려준다.
+
+    전송 실패는 리포트 생성 실패가 아니다. HTML 파일은 이미 저장돼 있어 --send로
+    다시 보낼 수 있으므로, 사유만 남기고 종료 코드는 0을 유지한다.
+
+    보내는 것은 render()의 완결 문서가 아니라 render_fragment()의 조각이다.
+    content는 게시판 페이지 본문에 그대로 삽입되므로 <!DOCTYPE>·<head>가 들어가면
+    안 되고, CSS도 리포트 안쪽으로 범위를 좁혀야 게시판 페이지가 덮이지 않는다.
+    """
+    title = report_title(b)
+    try:
+        from utils.api_util import ApiError, ApiUtil
+        from utils.telegram_util import TelegramUtil
+    except ImportError as e:
+        print(f"  ! API 전송 건너뜀: 패키지 미설치 ({e})", file=sys.stderr)
+        print("    조치: pip install -r requirements.txt", file=sys.stderr)
+        return False
+
+    try:
+        api = ApiUtil()
+    except EnvironmentError as e:
+        # BASE_URL 미설정. 전송을 안 쓰는 사용자도 있으므로 알림까지 보내진 않는다.
+        print(f"  ! API 전송 건너뜀: {e}", file=sys.stderr)
+        print("    조치: .env 에 BASE_URL 을 설정하세요 (.env.example 참고)", file=sys.stderr)
+        return False
+
+    try:
+        result = api.create_post(title=title, content=render_fragment(b),
+                                 category=POST_CATEGORY, writer=POST_WRITER)
+    except ApiError as e:
+        error_message = f"❌ [krx-daily-brief] API 전송 실패\n\n{e.message}"
+        print(f"  ! API 전송 실패: {e.message}", file=sys.stderr)
+        # 리포트 파일은 이미 저장돼 있다. 알림이 안 가더라도 그것 때문에 죽지는 않는다.
+        try:
+            TelegramUtil().send_test_message(error_message)
+        except Exception as te:
+            print(f"    (텔레그램 알림도 실패: {type(te).__name__})", file=sys.stderr)
+        return False
+
+    post_url = api.board_post_url(result)
+    print(f"  API 전송 완료: {title}")
+    print(f"  게시물: {post_url or '(링크 확인 실패)'}")
+
+    # 게시글은 이미 올라갔다. 알림이 실패해도 전송 자체는 성공이다.
+    try:
+        TelegramUtil().send_message(success_message(b, title, post_url))
+    except Exception as te:
+        print(f"  ! 텔레그램 안내 전송 실패: {type(te).__name__}: {str(te)[:80]}", file=sys.stderr)
+
+    return True
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -254,10 +335,18 @@ def main():
     ap.add_argument("--out", help="출력 HTML 경로 (기본: report_YYYYMMDD.html)")
     ap.add_argument("--demo", action="store_true", help="내장 샘플 데이터로 렌더링 테스트")
     ap.add_argument("--check", action="store_true", help="환경 자가진단 (.env·KRX·Yahoo 접속 확인)")
+    ap.add_argument("--send", action="store_true",
+                    help="생성된 리포트를 게시판 API(BASE_URL)로 전송 (기본: 전송 안 함)")
     args = ap.parse_args()
 
     if args.check:
         sys.exit(0 if selftest() else 1)
+
+    # 샘플 데이터로 만든 리포트가 실서버에 게시글로 남으면 지우기 전까지 되돌릴 수
+    # 없다. 렌더링 확인용인 --demo 와 전송은 함께 쓰지 못하게 막는다.
+    if args.demo and args.send:
+        ap.error("--demo 는 샘플 데이터라 --send 와 함께 쓸 수 없습니다. "
+                 "실제 전송은 --date 로 생성한 리포트에만 하세요.")
 
     if args.demo:
         b = demo_bundle()
@@ -334,6 +423,11 @@ def main():
     print(f"완료: {out}")
     if b.missing:
         print(f"  수집 실패 {len(b.missing)}건 - 리포트 말미 '데이터 수집 내역' 참조")
+
+    if args.send:
+        print("게시판 API 전송 중...")
+        # 실패해도 종료 코드는 0. 파일은 남아 있고 --send 로 재시도할 수 있다.
+        send_report(b)
 
 
 if __name__ == "__main__":

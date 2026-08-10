@@ -16,12 +16,17 @@ class ApiError(Exception):
         super().__init__(f"API Error (Status: {status_code}): {message}")
 
 class ApiUtil:
+    # 게시판 종류. 등록 엔드포인트(/api/board-research)와 조회 페이지(/board-research/{idx})가
+    # 같은 이름을 쓰므로 한 곳에 둔다.
+    BOARD = "board-research"
+
     def __init__(self):
         base_url = os.getenv("BASE_URL")
         if not base_url:
             raise EnvironmentError("환경 변수 'BASE_URL'가 설정되어 있지 않습니다.")
 
         base_url = base_url.rstrip("/")
+        self.base_url = base_url          # 게시물 조회 URL 조립에 쓴다
         self.api_base_url = f"{base_url}/api"
         self.headers = {
             "Accept": "application/json"
@@ -65,9 +70,24 @@ class ApiUtil:
             self.logger.error(f"이미지 압축 실패: {image_path} - {str(e)}")
             raise
 
+    def board_post_url(self, response: Optional[dict]) -> Optional[str]:
+        """게시글 생성 응답에서 게시물 조회 URL을 만든다. 만들 수 없으면 None.
+
+        서버(mqway)는 생성된 게시글 idx를 data.id 로 돌려주고
+        (BoardApiController::processStore), 조회 페이지 라우트는
+        board-research.show = /board-research/{idx} 다. 회원 전용이라 열람에는
+        로그인이 필요하다.
+        """
+        data = (response or {}).get("data") or {}
+        post_id = data.get("id")
+        if post_id is None:
+            self.logger.warning("응답에 게시글 id가 없어 게시물 URL을 만들지 못했습니다.")
+            return None
+        return f"{self.base_url}/{self.BOARD}/{post_id}"
+
     def create_post(self, title: str, content: str, category: str, writer: str, image_paths: Optional[List[str]] = None, thumbnail_image_path: str = None):
         """게시글 생성 API 호출 (이미지/썸네일 유무와 관계없이 단일 흐름)"""
-        url = f"{self.api_base_url}/board-research"
+        url = f"{self.api_base_url}/{self.BOARD}"
 
         try:
             data = {
@@ -139,7 +159,9 @@ class ApiUtil:
                     files.clear()
             else:
                 self.logger.info(f"게시글 생성 시작 (이미지 없음) - 제목: {title}")
-                response = requests.post(url, headers=self.headers, json=data)
+                # timeout 을 빼면 서버가 응답하지 않을 때 무한 대기한다.
+                # HTML 리포트 전송은 이미지가 없어 항상 이 경로를 탄다.
+                response = requests.post(url, headers=self.headers, json=data, timeout=30)
 
             # 응답 확인 및 한글 디코딩
             try:
@@ -174,35 +196,33 @@ class ApiUtil:
             raise ApiError(500, error_msg)
 
 if __name__ == "__main__":
-    # API 테스트
-    api = ApiUtil()
-    
-    # 테스트할 이미지 경로
-    image_paths = [
-        "img/opm_kospi_20241209.jpg",
-        "img/opm_kosdaq_20241209.jpg"
-    ]
-    
-    # 테스트 데이터
-    test_data = {
-        "title": "API 이미지 전송 테스트",
-        "content": "이미지 전송 테스트를 위한 게시글입니다.",
-        "category": "거래량",
-        "writer": "테스터"
-    }
-    
+    # 연결 확인용 수동 테스트. 실제 게시글이 하나 생성되므로 주의.
+    # 이 프로젝트는 이미지 없이 HTML 본문만 보내므로 그 경로만 확인한다.
+    import sys
+
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(errors="replace")   # 한국어 콘솔(cp949) 대응
+        except Exception:
+            pass
+
     try:
-        # API 호출 테스트
+        api = ApiUtil()
+    except EnvironmentError as e:
+        print(f"설정 오류: {e}")
+        sys.exit(1)
+
+    try:
         result = api.create_post(
-            title=test_data["title"],
-            content=test_data["content"],
-            category=test_data["category"],
-            writer=test_data["writer"],
-            image_paths=image_paths
+            title="API 전송 테스트",
+            content="<p>HTML 본문 전송 테스트입니다.</p>",
+            category="시황",
+            writer="admin",
         )
         print("API 호출 결과:", result)
-        
     except ApiError as e:
         print(f"API 에러 발생: {e}")
+        sys.exit(1)
     except Exception as e:
-        print(f"예상치 못한 에러 발생: {e}") 
+        print(f"예상치 못한 에러 발생: {type(e).__name__}: {e}")
+        sys.exit(1)

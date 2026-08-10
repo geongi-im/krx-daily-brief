@@ -176,17 +176,135 @@ CSS = """
 """
 
 
+# 게시판 API로 보낼 때 본문 조각을 감싸는 클래스. 이 이름 하나로 CSS 적용 범위를
+# 리포트 안쪽에 가둔다. 아래 _scope_css() 와 짝을 이룬다.
+SCOPE_CLASS = "krx-brief"
+
+# @media 처럼 안쪽에 '선택자 { 선언 }' 규칙을 다시 품는 at-rule. 이런 것만 재귀로
+# 파고들고, @font-face 나 @keyframes 처럼 안쪽이 선언·프레임인 at-rule은 손대지
+# 않는다 (선택자로 착각해 앞에 클래스를 붙이면 규칙이 깨진다).
+_NESTED_AT_RULES = ("@media", "@supports", "@container", "@layer")
+
+
+def _scope_selector(sel: str, scope: str) -> str:
+    """선택자 하나를 .scope 안쪽으로 한정한다."""
+    sel = sel.strip()
+    if not sel:
+        return ""
+    # 문서 루트를 겨냥한 선택자는 감싸는 div 자신으로 옮긴다. :root 에 있던 커스텀
+    # 속성도 이 div 에 얹히면 하위가 그대로 상속받는다.
+    if sel in (":root", "html", "body"):
+        return f".{scope}"
+    # 전체 선택자는 감싸는 div 자신도 포함해야 box-sizing 이 원본과 같아진다.
+    if sel == "*":
+        return f".{scope}, .{scope} *"
+    return f".{scope} {sel}"
+
+
+def _scope_css(css: str, scope: str) -> str:
+    """CSS 전체를 .scope 하위에만 적용되도록 다시 쓴다.
+
+    리포트 CSS는 body·h1·table 같은 요소 선택자를 그대로 쓴다. 이 문자열을 게시판
+    본문에 그대로 넣으면 게시판 페이지의 제목·표·배경까지 리포트 스타일로 덮인다.
+    파일로 저장하는 완결 문서는 그 CSS가 맞으므로, 원본을 고치는 대신 전송 직전에
+    이 함수로 범위만 좁힌 사본을 만든다.
+    """
+    out = []
+    i, n = 0, len(css)
+    while i < n:
+        brace = css.find("{", i)
+        if brace == -1:
+            break                       # 남은 건 공백·주석뿐
+        prelude = css[i:brace].strip()
+
+        depth, j = 1, brace + 1         # 짝이 맞는 '}' 찾기 (@media 중첩 대응)
+        while j < n and depth:
+            if css[j] == "{":
+                depth += 1
+            elif css[j] == "}":
+                depth -= 1
+            j += 1
+        body = css[brace + 1:j - 1]
+
+        if prelude.startswith("@"):
+            if prelude.startswith(_NESTED_AT_RULES):
+                out.append(f"{prelude}{{{_scope_css(body, scope)}}}")
+            else:
+                out.append(f"{prelude}{{{body.strip()}}}")
+        else:
+            sels = ",".join(
+                s for s in (_scope_selector(x, scope) for x in prelude.split(",")) if s)
+            out.append(f"{sels}{{{body.strip()}}}")
+        i = j
+    return "\n".join(out)
+
+
+def report_title(b: Bundle) -> str:
+    """문서 제목이자 게시글 제목. 두 곳이 갈라지지 않도록 한 곳에서 만든다."""
+    return f"{b.date} 코스피 대장주 마감시황"
+
+
+def summary_text(b: Bundle) -> str:
+    """게시판 목록 카드에 발췌문으로 걸리는 한 줄 요약. 평문만 담는다.
+
+    mqway 목록 화면은 본문을 strip_tags() 한 앞부분을 그대로 보여준다
+    (board_research/index.blade.php). strip_tags 는 <style> 태그만 걷어내고 그
+    안의 CSS 텍스트는 남기므로, 본문이 <style> 로 시작하면 발췌문 자리에 CSS
+    선언이 그대로 노출된다.
+
+    그래서 조각 맨 앞에 이 문장을 두고 <style> 은 맨 뒤로 보낸다. 다만 이 문장은
+    목록용이라 본문에서는 보일 이유가 없다 — 바로 아래 리포트 헤더와 내용이
+    겹쳐 지저분해진다. display:none 으로 감춰도 strip_tags 는 텍스트를 그대로
+    가져가므로 목록 발췌문은 유지되고 본문만 깔끔해진다.
+    """
+    parts = []
+    for name in ("코스피", "코스닥"):
+        i = b.indices.get(name) or {}
+        if i.get("close") is not None and i.get("chg_pct") is not None:
+            parts.append(f"{name} {i['close']:,.2f}({i['chg_pct']:+.2f}%)")
+    for name, s in b.stocks.items():
+        if s.get("close") is not None and s.get("chg_pct") is not None:
+            parts.append(f"{name} {s['close']:,}원({s['chg_pct']:+.2f}%)")
+
+    head = f"{b.date} 종가 기준"
+    if parts:
+        head += " · " + " · ".join(parts)
+    return head + " — 지수 기여도, 투자자 수급, 종목 펀더멘털, 미국 세션을 정리한 리포트입니다."
+
+
 def render(b: Bundle) -> str:
+    """파일로 저장할 완결 HTML 문서를 만든다."""
+    return (f"""<!DOCTYPE html>
+<html lang="ko"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{report_title(b)}</title>
+<style>{CSS}</style></head><body><div class="page">
+{render_body(b)}
+</div></body></html>""")
+
+
+def render_fragment(b: Bundle) -> str:
+    """게시판 API의 content 로 보낼 HTML 조각을 만든다.
+
+    board-research 의 content 는 게시판 페이지 본문에 그대로 삽입된다. 그래서
+    <!DOCTYPE>·<head> 를 뺀 조각이어야 하고, CSS 는 범위를 좁혀야 한다.
+
+    순서에 의미가 있다. 목록 화면의 발췌문이 strip_tags() 결과의 앞부분이라
+    목록용 요약을 맨 앞에 감춰 두고 <style> 은 맨 뒤로 보낸다 (summary_text 참고).
+    """
+    return (f'<p style="display:none">{esc(summary_text(b))}</p>\n'
+            f'<div class="{SCOPE_CLASS}"><div class="page">\n'
+            f'{render_body(b)}\n</div></div>\n'
+            f'<style>{_scope_css(CSS, SCOPE_CLASS)}</style>')
+
+
+def render_body(b: Bundle) -> str:
+    """<div class="page"> 안에 들어가는 본문. 문서 껍데기는 포함하지 않는다."""
     pos, neg, worst = build_signals(b)
     kospi = b.indices.get("코스피", {})
     P = []
 
-    P.append(f"""<!DOCTYPE html>
-<html lang="ko"><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>코스피·삼성전자·SK하이닉스 분석 — {b.date}</title>
-<style>{CSS}</style></head><body><div class="page">
-<h1>코스피·삼성전자·SK하이닉스 분석 — {b.date}</h1>
+    P.append(f"""<h1>{report_title(b)}</h1>
 <p><strong>기준 시점:</strong> {b.date} 종가 · 생성 {datetime.now().strftime("%Y-%m-%d %H:%M")} ·
 데이터: KRX(pykrx)·Yahoo Finance(yfinance), 전량 무료 공개 데이터<br>
 <strong>정보 제공 및 학습 목적이며, 투자 권유가 아닙니다. 특정 개인을 위한 투자 자문이 아닙니다.</strong></p>
@@ -547,7 +665,7 @@ def render(b: Bundle) -> str:
 투자 판단과 결과에 대한 책임은 투자자 본인에게 있습니다.</p>
 <p><em>가격은 {b.date} 종가 기준. 데이터: KRX 정보데이터시스템(pykrx), Yahoo Finance(yfinance).
 기여도·기술지표·등락 요인은 자체 산출했으며 산출 방법은 본문에 명시했습니다.</em></p>
-</footer></div></body></html>""")
+</footer>""")
     return "\n".join(P)
 
 
