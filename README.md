@@ -1,7 +1,9 @@
 # 일자 기반 시황 리포트 생성기
 
-특정 거래일을 지정하면 무료 공개 데이터(KRX, Yahoo Finance, 뉴스)만으로
-코스피·삼성전자·SK하이닉스 중심의 시황 분석 HTML 리포트를 생성합니다.
+무료 공개 데이터(KRX, Yahoo Finance, 뉴스)만으로 코스피·삼성전자·SK하이닉스
+중심의 시황 분석 HTML 리포트를 생성합니다. 기준일을 지정할 수도 있고, 생략하면
+오늘로 잡혀 스케줄러로 매일 돌릴 수 있습니다. `--send`를 붙이면 생성한 리포트를
+게시판에 올리고 텔레그램으로 알립니다.
 
 리포트는 **"왜 올랐는가"를 단정하지 않습니다.** 가격·수급·기술 지표를 수치로 싣고,
 같은 기간의 재료성 보도를 제목 그대로 인용하되 둘의 인과관계는 판정하지 않습니다.
@@ -57,17 +59,82 @@ pykrx(1.2.8)는 세션을 만들거나 만료 후 갱신할 때 `KRX_ID` / `KRX_
 ## 사용법
 
 ```bash
+.venv\Scripts\python main.py                  # 오늘 기준 리포트 생성
 .venv\Scripts\python main.py --date 2026-08-07
 ```
 
 | 옵션 | 설명 |
 |---|---|
-| `--date YYYY-MM-DD` | 기준 거래일. `output\report_YYYYMMDD.html` 생성 |
+| `--date YYYY-MM-DD` | 기준 거래일. **생략하면 오늘**. `output\report_YYYYMMDD.html` 생성 |
+| `--send` | 생성한 리포트를 게시판 API로 전송 (아래 참조). 기본은 전송하지 않음 |
 | `--out 경로` | 출력 경로 직접 지정 |
 | `--demo` | 내장 샘플로 렌더링만 확인. `output\_demo.html`에 저장되어 실제 리포트를 덮어쓰지 않음 (네트워크 불필요) |
 | `--check` | 환경 자가진단 |
 
 휴장일을 지정하면 데이터가 없어 실패합니다. 기준일은 거래일이어야 합니다.
+`--date`를 생략할 때의 "오늘"은 **시스템 시간대 기준**이므로, 서버 TZ가
+`Asia/Seoul`이 아니면 날짜가 하루 어긋납니다.
+
+실행 경과는 콘솔과 `logs\YYYY-MM-DD_log.log`에 함께 기록됩니다. 스케줄러로 돌릴 때
+실패 원인은 이 파일에서 확인하세요. 오래된 로그를 지우는 로직은 없습니다.
+
+---
+
+## 게시판 전송 (`--send`)
+
+생성한 리포트를 MQWAY 게시판(`board-research`)에 올리고, 성공하면 게시물 링크를
+텔레그램으로 안내합니다. `.env`에 아래 값이 필요합니다 (`.env.example` 참조).
+
+| 변수 | 용도 |
+|---|---|
+| `BASE_URL` | 게시판 서버 주소. 끝의 `/api`는 코드가 붙이므로 `https://example.com`까지만 |
+| `TELEGRAM_BOT_TOKEN` | 봇 토큰 |
+| `TELEGRAM_CHAT_ID` | 전송 성공 안내가 가는 운영 채팅방 |
+| `TELEGRAM_CHAT_TEST_ID` | 전송 **실패** 알림이 가는 테스트 채팅방 |
+
+전송되는 본문은 파일로 저장되는 완결 HTML 문서가 아니라 **조각**입니다. 게시판이
+본문을 페이지 안에 그대로 삽입하므로 `<!DOCTYPE>`·`<head>`를 빼고, 리포트 CSS는
+`.krx-brief` 하위로 범위를 좁혀 게시판 페이지가 덮이지 않게 합니다
+(`render.py`의 `render_fragment()` / `_scope_css()`).
+
+목록 카드 썸네일로 `img\thumbnail.png`를 매번 함께 올립니다. 파일이 없으면 경고만
+남기고 썸네일 없이 진행합니다.
+
+동작상 알아둘 점:
+
+- **HTML 파일은 전송 전에 먼저 저장됩니다.** 전송이 실패해도 리포트는 남고
+  `--send`로 다시 보낼 수 있습니다.
+- **전송 실패해도 종료 코드는 0**입니다. 리포트 생성 자체는 성공했기 때문입니다.
+  스케줄러가 전송 실패를 감지하게 하려면 이 부분을 바꿔야 합니다.
+- 텔레그램은 **성공 시 운영 채널, 실패 시 테스트 채널**로 갑니다. 둘이 동시에
+  가지는 않습니다.
+- `BASE_URL`이 비어 있으면 전송을 건너뛰고 경고만 남깁니다.
+- `--demo --send`는 차단됩니다. 샘플 데이터가 실서버에 게시글로 남으면 API로는
+  지울 수 없기 때문입니다.
+
+### 스케줄러 등록 (월~금)
+
+`--date`를 생략하면 오늘로 잡히므로 명령에 날짜를 넣지 않아도 됩니다.
+
+Linux — `crontab -e`
+
+```cron
+10 18 * * 1-5 cd /srv/krx-daily-brief && .venv/bin/python main.py --send >> logs/cron.log 2>&1
+```
+
+서버 TZ가 KST가 아니면 파일 맨 위에 `CRON_TZ=Asia/Seoul`을 넣으세요.
+
+Windows
+
+```powershell
+schtasks /Create /TN "krx-daily-brief" /SC WEEKLY /D MON,TUE,WED,THU,FRI /ST 18:10 /TR "powershell -NoProfile -WindowStyle Hidden -Command \"Set-Location 'C:\경로\krx-daily-brief'; .\.venv\Scripts\python.exe main.py --send\""
+```
+
+장 마감(15:30) 이후면 되지만 수급 잠정치가 채워질 여유를 두어 18시대로 잡았습니다.
+
+**공휴일 주의** — 월~금이어도 공휴일은 휴장이라 지수 조회가 실패하고 `exit 1`로
+끝납니다. 전송 단계 전에 죽으므로 **텔레그램 알림이 가지 않습니다.** 그날의 실패는
+로그에만 남습니다.
 
 ### 문제가 생기면
 
@@ -95,12 +162,17 @@ pykrx(1.2.8)는 세션을 만들거나 만료 후 갱신할 때 `KRX_ID` / `KRX_
 
 | 파일 | 용도 |
 |---|---|
-| `main.py` | 진입점 — CLI, `.env` 로드, KRX 로그인 진단, 자가진단(`--check`) |
+| `main.py` | 진입점 — CLI, `.env` 로드, KRX 로그인 진단, 자가진단(`--check`), 게시판 전송 |
 | `collect.py` | 수집 — 설정 상수, `Bundle`, KRX·야후·뉴스 수집, 데모 데이터 |
-| `render.py` | 렌더링 — 포맷 헬퍼, 자동 신호, HTML 템플릿, 독립성 가드 |
-| `requirements.txt` | 의존성 (pykrx, yfinance, pandas, requests, beautifulsoup4) |
-| `.env` / `.env.example` | KRX 계정 (`.env`는 공유 금지) |
+| `render.py` | 렌더링 — 포맷 헬퍼, 자동 신호, HTML 템플릿, 전송용 조각, 독립성 가드 |
+| `utils/api_util.py` | 게시판 API 클라이언트 (게시글 생성, 이미지 압축, 게시물 URL 조립) |
+| `utils/telegram_util.py` | 텔레그램 전송 |
+| `utils/logger_util.py` | 로거 — `logs/YYYY-MM-DD_log.log` |
+| `requirements.txt` | 의존성 (pykrx, yfinance, pandas, requests, beautifulsoup4, Pillow) |
+| `.env` / `.env.example` | KRX 계정·게시판 URL·텔레그램 토큰 (`.env`는 공유 금지) |
+| `img/thumbnail.png` | 게시판 목록 카드에 쓰는 고정 썸네일 |
 | `output/report_*.html` | 생성된 리포트 |
+| `logs/*.log` | 실행 로그 (커밋 제외) |
 
 의존 방향은 `main.py → render.py → collect.py` 한 방향입니다. 종목·티커·뉴스 필터
 같은 설정 상수와 `Bundle`은 모두 `collect.py`에 있고, HTML·문구 수정은 `render.py`
