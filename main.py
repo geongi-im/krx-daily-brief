@@ -17,6 +17,8 @@ v1과의 차이:
         · 미국 세션 확장 (S&P500/나스닥/SOX/엔비디아 + 달러인덱스/유가)
 
 사용법:
+    python main.py                          # 오늘 기준 리포트 생성
+    python main.py --send                   # 생성 후 게시판 API 전송 (스케줄러용)
     python main.py --date 2026-08-07
     python main.py --date 2026-08-07 --out report.html
     python main.py --demo
@@ -337,7 +339,7 @@ def send_report(b):
 
 def main():
     ap = argparse.ArgumentParser(description="일자 기반 시황 리포트 생성기 v2 (수집 가능 데이터 중심)")
-    ap.add_argument("--date", help="기준 거래일 (YYYY-MM-DD)")
+    ap.add_argument("--date", help="기준 거래일 (YYYY-MM-DD, 기본: 오늘)")
     ap.add_argument("--out", help="출력 HTML 경로 (기본: report_YYYYMMDD.html)")
     ap.add_argument("--demo", action="store_true", help="내장 샘플 데이터로 렌더링 테스트")
     ap.add_argument("--check", action="store_true", help="환경 자가진단 (.env·KRX·Yahoo 접속 확인)")
@@ -357,13 +359,14 @@ def main():
     if args.demo:
         b = demo_bundle()
     else:
-        if not args.date:
-            ap.error("--date 를 지정하거나 --demo 를 사용하세요.")
+        # 스케줄러가 매일 같은 명령으로 돌 수 있도록 생략 시 오늘로 잡는다.
+        # (시스템 시간대 기준이므로 서버 TZ가 Asia/Seoul 이어야 날짜가 맞다.)
+        date_str = args.date or datetime.now().strftime("%Y-%m-%d")
         try:
-            dt = datetime.strptime(args.date, "%Y-%m-%d")
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
         except ValueError:
             ap.error("날짜 형식은 YYYY-MM-DD 입니다.")
-        b = Bundle(date=args.date, date_krx=dt.strftime("%Y%m%d"))
+        b = Bundle(date=date_str, date_krx=dt.strftime("%Y%m%d"))
         loaded = load_env()
         login_id, login_pw = krx_credentials()
         if not (login_id and login_pw):
@@ -371,7 +374,8 @@ def main():
             print(f"  ※ 참고: 최신 pykrx는 KRX 정보데이터시스템 계정이 필요할 수 있습니다. ({src})\n"
                   "    data.krx.co.kr 무료 회원가입 후 이 폴더의 .env에 입력하세요:\n"
                   "      KRX_LOGIN_ID=아이디\n      KRX_LOGIN_PASSWORD=비밀번호")
-        print(f"[1/4] KRX 데이터 수집 중... ({args.date})")
+        print(f"[1/4] KRX 데이터 수집 중... ({date_str}"
+              f"{'' if args.date else ', --date 생략 → 오늘'})")
         try:
             collect_krx(b)
         except ImportError:
