@@ -47,13 +47,21 @@ import argparse
 import html
 import os
 import sys
-import traceback
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 
 from collect import Bundle, collect_krx, collect_news, collect_us, demo_bundle
 from render import render, render_fragment, report_title, validate_independence
+from utils.logger_util import LoggerUtil
+
+# 스케줄러로 매일 돌리면 콘솔 출력은 아무도 보지 않는다. 진행 상황과 실패 사유를
+# logs/YYYY-MM-DD_log.log 에 남겨 나중에 원인을 되짚을 수 있게 한다.
+#
+# LoggerUtil 은 파일과 콘솔 양쪽에 쓰므로 실행 경과는 print 와 섞지 않는다.
+# 섞으면 파이프로 넘길 때 stdout(블록 버퍼)과 로거의 stderr(줄 버퍼)가 뒤엉켜
+# 출력 순서가 실제 실행 순서와 달라진다. utils/api_util.py 도 같은 로거를 쓴다.
+logger = LoggerUtil().get_logger()
 
 # 한국어 Windows 콘솔은 cp949라 '—'(U+2014) 같은 문자를 인코딩하지 못해
 # 진단 메시지를 출력하는 순간 UnicodeEncodeError로 죽는다. 오류 문구를 보여주려다
@@ -169,15 +177,19 @@ def probe_krx_login():
     return code == "CD001", code, msg
 
 
-def report_krx_login_failure(code, msg, stream=None):
-    """로그인 실패 사유와 해결 방법을 한 덩어리로 출력한다."""
-    f = stream or sys.stdout
-    print(f"    사유: {code + ': ' if code else ''}{msg}", file=f)
+def report_krx_login_failure(code, msg, emit=None):
+    """로그인 실패 사유와 해결 방법을 한 덩어리로 내보낸다.
+
+    emit 은 한 줄을 받는 함수다. 자가진단(--check)은 사람이 읽는 보고서라
+    print 를, 리포트 생성 중 실패는 로그로 남아야 하므로 logger.error 를 준다.
+    """
+    emit = emit or print
+    emit(f"    사유: {code + ': ' if code else ''}{msg}")
     fix = KRX_LOGIN_FIX.get(code)
     if fix:
-        print(f"    조치: {fix}", file=f)
+        emit(f"    조치: {fix}")
     elif code:
-        print("    조치: data.krx.co.kr에 해당 계정으로 직접 로그인해 상태를 확인하세요.", file=f)
+        emit("    조치: data.krx.co.kr에 해당 계정으로 직접 로그인해 상태를 확인하세요.")
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +256,9 @@ def selftest():
 
     print("\n진단 결과: " + ("모두 정상 - main.py --date YYYY-MM-DD 로 리포트를 생성하세요"
                             if ok else "위 항목을 해결한 뒤 다시 실행하세요"))
+    # 서버에서 원격으로 돌렸을 때도 결과가 남도록 판정만 로그에 남긴다.
+    # 항목별 상세는 사람이 읽는 보고서라 위의 print 로 둔다.
+    logger.info(f"환경 자가진단(--check) 결과: {'정상' if ok else '실패'}")
     return ok
 
 
@@ -294,16 +309,16 @@ def send_report(b):
         from utils.api_util import ApiError, ApiUtil
         from utils.telegram_util import TelegramUtil
     except ImportError as e:
-        print(f"  ! API 전송 건너뜀: 패키지 미설치 ({e})", file=sys.stderr)
-        print("    조치: pip install -r requirements.txt", file=sys.stderr)
+        logger.error(f"API 전송 건너뜀: 패키지 미설치 ({e})")
+        logger.error("    조치: pip install -r requirements.txt")
         return False
 
     try:
         api = ApiUtil()
     except EnvironmentError as e:
         # BASE_URL 미설정. 전송을 안 쓰는 사용자도 있으므로 알림까지 보내진 않는다.
-        print(f"  ! API 전송 건너뜀: {e}", file=sys.stderr)
-        print("    조치: .env 에 BASE_URL 을 설정하세요 (.env.example 참고)", file=sys.stderr)
+        logger.error(f"API 전송 건너뜀: {e}")
+        logger.error("    조치: .env 에 BASE_URL 을 설정하세요 (.env.example 참고)")
         return False
 
     try:
@@ -312,23 +327,25 @@ def send_report(b):
                                  thumbnail_image_path=THUMBNAIL_PATH)
     except ApiError as e:
         error_message = f"❌ [krx-daily-brief] API 전송 실패\n\n{e.message}"
-        print(f"  ! API 전송 실패: {e.message}", file=sys.stderr)
+        logger.error(f"API 전송 실패: {e.message}")
         # 리포트 파일은 이미 저장돼 있다. 알림이 안 가더라도 그것 때문에 죽지는 않는다.
         try:
             TelegramUtil().send_test_message(error_message)
+            logger.info("실패 알림을 텔레그램 테스트 채널로 보냈습니다.")
         except Exception as te:
-            print(f"    (텔레그램 알림도 실패: {type(te).__name__})", file=sys.stderr)
+            logger.error(f"텔레그램 알림도 실패: {type(te).__name__}: {str(te)[:80]}")
         return False
 
     post_url = api.board_post_url(result)
-    print(f"  API 전송 완료: {title}")
-    print(f"  게시물: {post_url or '(링크 확인 실패)'}")
+    logger.info(f"API 전송 완료: {title}")
+    logger.info(f"게시물: {post_url or '(링크 확인 실패)'}")
 
     # 게시글은 이미 올라갔다. 알림이 실패해도 전송 자체는 성공이다.
     try:
         TelegramUtil().send_message(success_message(b, title, post_url))
+        logger.info("텔레그램 안내 전송 완료")
     except Exception as te:
-        print(f"  ! 텔레그램 안내 전송 실패: {type(te).__name__}: {str(te)[:80]}", file=sys.stderr)
+        logger.error(f"텔레그램 안내 전송 실패: {type(te).__name__}: {str(te)[:80]}")
 
     return True
 
@@ -371,50 +388,50 @@ def main():
         login_id, login_pw = krx_credentials()
         if not (login_id and login_pw):
             src = ".env 파일은 읽었으나 값이 비어 있습니다" if loaded else ".env 파일이 없습니다"
-            print(f"  ※ 참고: 최신 pykrx는 KRX 정보데이터시스템 계정이 필요할 수 있습니다. ({src})\n"
-                  "    data.krx.co.kr 무료 회원가입 후 이 폴더의 .env에 입력하세요:\n"
-                  "      KRX_LOGIN_ID=아이디\n      KRX_LOGIN_PASSWORD=비밀번호")
-        print(f"[1/4] KRX 데이터 수집 중... ({date_str}"
-              f"{'' if args.date else ', --date 생략 → 오늘'})")
+            logger.warning(f"KRX 계정 미설정 ({src}). 최신 pykrx는 KRX 정보데이터시스템 "
+                           "계정이 필요할 수 있습니다. data.krx.co.kr 무료 회원가입 후 "
+                           "이 폴더의 .env에 KRX_LOGIN_ID / KRX_LOGIN_PASSWORD를 입력하세요.")
+        logger.info(f"[1/4] KRX 데이터 수집 중... ({date_str}"
+                    f"{'' if args.date else ', --date 생략 → 오늘'})")
         try:
             collect_krx(b)
         except ImportError:
-            print("  ! pykrx 미설치: pip install pykrx", file=sys.stderr)
+            logger.error("pykrx 미설치: pip install pykrx")
             sys.exit(1)
         except RuntimeError as e:
-            print(f"  ! {e}", file=sys.stderr)
+            logger.error(str(e))
             # 지수 조회 실패는 '휴장일'처럼 보이지만 실제로는 로그인 실패인 경우가
             # 많다. 엉뚱한 날짜를 의심하며 헤매지 않도록 여기서 원인을 확인한다.
             logged_in, code, msg = probe_krx_login()
             if not logged_in:
-                print("  ! 실제 원인: KRX 로그인 실패 (휴장일 문제가 아닙니다)", file=sys.stderr)
-                report_krx_login_failure(code, msg, stream=sys.stderr)
-                print("    점검: .venv\\Scripts\\python main.py --check", file=sys.stderr)
+                logger.error("실제 원인: KRX 로그인 실패 (휴장일 문제가 아닙니다)")
+                report_krx_login_failure(code, msg, emit=logger.error)
+                logger.error("    점검: .venv\\Scripts\\python main.py --check")
             sys.exit(1)
         except Exception:
-            traceback.print_exc()
+            logger.exception("KRX 수집 중 예외")
             b.miss("KRX 일부", "수집 중 예외")
-        print("[2/4] 미국 세션·거시 데이터 수집 중...")
+        logger.info("[2/4] 미국 세션·거시 데이터 수집 중...")
         try:
             collect_us(b)
         except ImportError:
-            print("  ! yfinance 미설치: pip install yfinance", file=sys.stderr)
+            logger.error("yfinance 미설치: pip install yfinance")
             b.miss("미국 세션·거시 전체", "yfinance 미설치")
         except Exception:
-            traceback.print_exc()
+            logger.exception("미국 세션·거시 수집 중 예외")
             b.miss("미국 세션·거시 전체", "수집 중 예외")
 
-        print("[3/4] 뉴스 제목 수집 중...")
+        logger.info("[3/4] 뉴스 제목 수집 중...")
         try:
             collect_news(b)
         except ImportError as e:
-            print(f"  ! 뉴스 수집 패키지 미설치: {e}", file=sys.stderr)
+            logger.error(f"뉴스 수집 패키지 미설치: {e}")
             b.miss("뉴스 전체", "beautifulsoup4/requests 미설치")
         except Exception:
-            traceback.print_exc()
+            logger.exception("뉴스 수집 중 예외")
             b.miss("뉴스 전체", "수집 중 예외")
 
-    print("[4/4] HTML 렌더링 중...")
+    logger.info("[4/4] HTML 렌더링 중...")
     html = render(b)
     validate_independence(html)   # 설계 원칙 5: 리포트 독립성 검사
     # 기본 출력은 스크립트 폴더의 output/ 하위 (없으면 자동 생성)
@@ -430,12 +447,13 @@ def main():
         os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"완료: {out}")
+    logger.info(f"리포트 생성 완료: {out}")
     if b.missing:
-        print(f"  수집 실패 {len(b.missing)}건 - 리포트 말미 '데이터 수집 내역' 참조")
+        logger.warning(f"수집 실패 {len(b.missing)}건 - 리포트 말미 '데이터 수집 내역' 참조: "
+                       + ", ".join(item for item, _ in b.missing))
 
     if args.send:
-        print("게시판 API 전송 중...")
+        logger.info("게시판 API 전송 중...")
         # 실패해도 종료 코드는 0. 파일은 남아 있고 --send 로 재시도할 수 있다.
         send_report(b)
 
